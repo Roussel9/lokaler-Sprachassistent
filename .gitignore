@@ -1,0 +1,28 @@
+# Python / Virtual Environment
+assistent-env/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+
+# Modelle (groß, sollen Nutzer selbst herunterladen)
+models/vosk-model-*/
+models/piper/*.onnx
+models/piper/*.onnx.json
+
+# Outputs (generierte Audios)
+outputs/
+tts/outputs/
+*.wav
+
+# Datenbank (soll lokal neu erstellt werden)
+database/gespraeche.db
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
