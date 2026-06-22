@@ -1,0 +1,8 @@
+gradio
+vosk
+numpy
+scipy
+torch
+transformers
+piper-tts
+onnxruntime
