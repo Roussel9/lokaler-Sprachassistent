@@ -1,81 +1,65 @@
-"""
-interface.py
-"""
-
-import gradio as gr
-
-
-def erstelle_interface(transkribiere_fn, antworte_fn, verlauf_fn):
-    with gr.Blocks(title="Lokaler Sprachassistent") as demo:
-
-        gr.Markdown("# Lokaler Sprachassistent")
-        gr.Markdown(
-            "**STT:** Vosk  |  **LLM:** Gemma3 via Ollama  |  "
-            "**TTS:** Piper / Thorsten (männlich, offline)"
-        )
-        gr.Markdown(
-            "1. Sprechen → **Transkribieren**  "
-            "2. Text prüfen/korrigieren  "
-            "3. **Antwort anfordern**  "
-            "(WAV von Tablet hochladen = Mikrofon-Test)"
-        )
-
-        with gr.Row():
-            with gr.Column(scale=1):
-                audio_input = gr.Audio(
-                    sources=["microphone", "upload"],
-                    type="filepath",
-                    label="Hier sprechen oder WAV hochladen",
-                    format="wav",
-                    buttons=["download"],
-                    waveform_options={"sample_rate": 16000},
-                )
-                transkribieren_btn = gr.Button("1. Transkribieren", variant="secondary")
-                antwort_btn = gr.Button("2. Antwort anfordern", variant="primary")
-
-            with gr.Column(scale=2):
-                frage_out = gr.Textbox(
-                    label="Erkannte Frage (korrigierbar vor dem Senden)",
-                    lines=3,
-                    interactive=True,
-                )
-                antwort_out = gr.Textbox(
-                    label="Antwort (Gemma3)",
-                    lines=5,
-                    interactive=False,
-                )
-                audio_out = gr.Audio(
-                    label="Antwort als Audio (Thorsten)",
-                    type="filepath",
-                    interactive=False,
-                    autoplay=True,
-                    buttons=["download"],
-                )
-                zeiten_out = gr.Textbox(
-                    label="Zeitmessung",
-                    lines=1,
-                    interactive=False,
-                )
-
-        gr.Markdown("## Gesprächsverlauf")
-        verlauf_tabelle = gr.Dataframe(
-            headers=["Zeit", "Frage", "Antwort", "STT(s)", "LLM(s)", "TTS(s)", "Gesamt(s)"],
-            label="Alle Gespräche",
-            wrap=True,
-        )
-
-        transkribieren_btn.click(
-            fn=transkribiere_fn,
-            inputs=[audio_input],
-            outputs=[frage_out, zeiten_out],
-        )
-
-        antwort_btn.click(
-            fn=antworte_fn,
-            inputs=[frage_out],
-            outputs=[frage_out, antwort_out, audio_out, zeiten_out, verlauf_tabelle],
-        )
-
-        demo.load(fn=verlauf_fn, outputs=[verlauf_tabelle])
-
-    return demo
+"""
+interface.py
+"""
+
+import gradio as gr
+
+def erstelle_interface(transkribiere_fn, antworte_fn, verlauf_fn, status_fn):
+    with gr.Blocks(title="Lokaler Sprachassistent") as demo:
+
+        gr.Markdown("# 🎙️ Lokaler Sprachassistent")
+        gr.Markdown(
+            "**Wake Word:** 'Assistent' oder 'Jarvis'  |  "
+            "**STT:** Whisper  |  "
+            "**LLM:** Gemma3 (Streaming)  |  "
+            "**TTS:** Piper (Echtzeit)"
+        )
+
+        gr.Markdown("""
+        ### 💬 So funktioniert es:
+        1. Sage **'Assistent'** oder **'Jarvis'**
+        2. Deine Frage wird transkribiert
+        3. Die Antwort erscheint **Wort für Wort** – **gleichzeitig** wird jedes Wort vorgelesen!
+        """)
+
+        status_out = gr.Textbox(label="Status", value="👂 Warte auf Wake Word...", lines=1, interactive=False)
+
+        with gr.Row():
+            with gr.Column(scale=1):
+                frage_out = gr.Textbox(label="📝 Erkannte Frage", lines=3, interactive=False)
+            with gr.Column(scale=1):
+                antwort_out = gr.Textbox(
+                    label="💬 Antwort (Wort für Wort)",
+                    lines=5,
+                    interactive=False,
+                )
+
+        audio_out = gr.Audio(
+            label="🔊 Aktuelles Wort",
+            type="filepath",
+            interactive=False,
+            autoplay=True,  # Sofort abspielen!
+        )
+
+        timer = gr.Timer(value=0.4)  # Etwas langsamer für stabile Updates
+
+        def update_ui():
+            status, frage, antwort, wav = status_fn()
+            return status, frage, antwort, wav
+
+        timer.tick(update_ui, outputs=[status_out, frage_out, antwort_out, audio_out])
+
+        gr.Markdown("## 📚 Gesprächsverlauf")
+        verlauf_tabelle = gr.Dataframe(
+            headers=["Zeit", "Frage", "Antwort", "STT(s)", "LLM(s)", "TTS(s)", "Gesamt(s)"],
+            label="Alle Gespräche",
+            wrap=True,
+        )
+
+        def update_table():
+            return verlauf_fn()
+
+        timer.tick(update_table, outputs=[verlauf_tabelle])
+        demo.load(fn=verlauf_fn, outputs=[verlauf_tabelle])
+
+    return demo

@@ -1,2 +1,2 @@
 from .recorder import aufnehmen_bis_stille
-from .transcriber import VoskTranskriberer
+from .whisper_transcriber import WhisperTranskriberer
