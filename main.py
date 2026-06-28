@@ -1,13 +1,32 @@
 """
 main.py
-Sprachassistent mit echtem Wort-für-Wort Streaming – Audio sofort abspielen!
+Sprachassistent mit echtem Streaming-Output-Pipeline (satzweise synchron).
+
+Output-Pipeline (LLM -> TTS -> UI), neu aufgesetzt:
+
+    Ollama token stream
+        |  (token delta)
+        v
+    StreamingPipeline.feed()  -> SentenceChunker -> [text_queue]
+                                                          v
+                                              PiperWorker (besitzt PiperVoice)
+                                                          v
+                                                    [audio_queue]
+                                                          v
+                                AudioPlayer (ein einziger sd.OutputStream)
+                                                          v
+                                on_spoken(text) -> StreamingState (lock) -> UI
+
+Dadurch:
+  * Die erste fertige Saetze wird sofort synthetisiert und abgespielt.
+  * Generierung, Synthese und Wiedergabe uelappen sich (Pipelining).
+  * Text erscheint genau dann, wenn der zugehoerige Satz gesprochen wird.
 """
 
 import os
 import time
 import threading
 import tempfile
-import numpy as np
 import scipy.io.wavfile as wavfile
 from pathlib import Path
 
@@ -16,6 +35,7 @@ from stt.recorder import aufnehmen_bis_stille
 from llm.ollama_client import OllamaClient
 from database.db import Datenbank
 from tts.synthesizer import Synthesizer
+from tts.streaming_pipeline import StreamingPipeline, StreamingState
 from ui.interface import erstelle_interface
 from wakeword.wakeword_listener import start_wakeword_listener
 
@@ -30,30 +50,34 @@ datenbank = Datenbank()
 synthesizer = Synthesizer()
 print("✓ Alle Komponenten geladen.\n")
 
+# ---------------------------------------------------------------------------
+# Thread-sicherer UI-Zustand.
+# Frueher waren das ungeschuetzte Modul-Globals, die der Gradio-Timer ohne Lock
+# gelesen hat (torn reads). Jetzt leben alle UI-Felder in einem Objekt mit
+# eigenem Lock und werden ueber .snapshot() atomar gelesen.
+# ---------------------------------------------------------------------------
+_state = StreamingState(status="👂 Warte auf Wake Word...")
+
+# Wake-Word-/Abarbeitungs-Steuerung (bleibt wie bisher, nur auf _state umgestellt).
 _wake_triggered = False
 _wake_lock = threading.Lock()
-_last_status = "👂 Warte auf Wake Word..."
-_last_frage = ""
-_last_antwort = ""
-_last_wav = None
-_streaming_text = ""
-_streaming_audio = []
 _processing = False
 _listener = None
-_current_chunk_index = 0
+
 
 def on_wake():
-    global _wake_triggered, _last_status, _processing
+    global _wake_triggered, _processing
     with _wake_lock:
         if _processing:
             return
         print("✅ WAKE WORD ERKANNT!")
         _wake_triggered = True
-        _last_status = "🎤 Wake Word erkannt! Bitte sprechen..."
+        _state.set_status("🎤 Wake Word erkannt! Bitte sprechen...")
+
 
 def process_wake():
-    global _wake_triggered, _last_status, _last_frage, _last_antwort, _last_wav
-    global _processing, _streaming_text, _streaming_audio, _current_chunk_index
+    """Haupt-Abarbeitungs-Loop: Wake -> Aufnahme -> STT -> gestreamtes LLM+TTS."""
+    global _wake_triggered, _processing
 
     while True:
         time.sleep(0.3)
@@ -65,18 +89,20 @@ def process_wake():
             _processing = True
 
         try:
-            _last_status = "🎙️ Aufnahme läuft..."
+            _state.set_status("🎙️ Aufnahme läuft...")
             print("🎙️ Aufnahme läuft...")
-            audio = aufnehmen_bis_stille(max_dauer=8.0, stille_schwelle=150, stille_dauer=1.2)
+            audio = aufnehmen_bis_stille(
+                max_dauer=8.0, stille_schwelle=150, stille_dauer=1.2
+            )
 
             if len(audio) == 0:
-                _last_status = "❌ Kein Audio erkannt."
-                _last_frage = ""
+                _state.set_status("❌ Kein Audio erkannt.")
+                _state.set_question("")
                 with _wake_lock:
                     _processing = False
                 continue
 
-            _last_status = "⏳ Transkribiere..."
+            _state.set_status("⏳ Transkribiere...")
             print("⏳ Transkribiere...")
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             wavfile.write(tmp.name, 16000, audio)
@@ -85,70 +111,92 @@ def process_wake():
             os.unlink(tmp.name)
 
             if not frage_text:
-                _last_status = "❌ Kein Text erkannt."
-                _last_frage = ""
+                _state.set_status("❌ Kein Text erkannt.")
+                _state.set_question("")
                 with _wake_lock:
                     _processing = False
                 continue
 
-            _last_frage = frage_text
-            _last_status = f"📝 Erkannt: {frage_text[:50]}..."
+            _state.set_question(frage_text)
+            _state.set_status(f"📝 Erkannt: {frage_text[:50]}...")
             print(f"📝 Erkannt: {frage_text}")
 
-            _last_status = "🧠 KI denkt..."
-            print("🧠 KI denkt...")
+            _state.set_status("🧠 KI denkt & spricht ...")
+            print("🧠 KI denkt & spricht (gestreamt) ...")
 
-            # ── STREAMING: Wort für Wort ──────────────────────────────────
-            _streaming_text = ""
-            _streaming_audio = []
-            _current_chunk_index = 0
+            # ── STREAMING-PIPELINE FUER DIESE ANTWORT ────────────────────
+            # Frueher: Wort-fuer-Wort sd.play() + danach nochmal ganz
+            # synthetisieren (doppelt, asynchron). Jetzt: eine Pipeline pro
+            # Antwort. Der AudioPlayer gibt den Text WORTWEISE frei, getacktet
+            # vom echten Audio-Takt: jedes Wort erscheint genau, wenn es
+            # vorgelesen wird, und das letzte Wort kommt mit dem letzten Sample.
+            _state.reset_spoken()
+            wav_pfad = OUTPUT_DIR / f"stream_{int(time.time())}.wav"
+            pipeline = StreamingPipeline(
+                voice=synthesizer.stimme,
+                syn_config=synthesizer.synth_config,
+                state=_state,
+                wav_path=str(wav_pfad),
+            )
+            pipeline.start()
 
-            def on_word(word):
-                global _streaming_text, _last_status, _streaming_audio, _current_chunk_index
-                # Text aktualisieren
-                _streaming_text += word + " "
-                _last_status = f"💬 {_streaming_text[:50]}..."
+            t_llm_start = time.perf_counter()
 
-                # Wort SOFORT abspielen (ohne WAV-Datei)
-                synthesizer.synthesiere_wort_sofort(word)
-                print(f"🔊 Wort abgespielt: '{word}'")
+            def on_token(delta):
+                # Delta = roher Ollama-Token (kein Wort!). Der Chunker fasst
+                # Tokens zu ganzen Saetzen zusammen; feed() blockiert, wenn die
+                # Text-Queue voll ist -> Selbsttaktung (kein Vorauseilen).
+                pipeline.feed(delta)
 
-            # LLM Streaming starten
             verlauf = datenbank.lade_verlauf(anzahl=6)
-            ergebnis = llm_client.frage_streaming(frage_text, verlauf, callback=on_word)
+            ergebnis = llm_client.frage_streaming(
+                frage_text, verlauf, callback=on_token
+            )
+            dauer_llm = round(time.perf_counter() - t_llm_start, 3)
 
-            antwort_text = ergebnis["antwort"]
-            _last_antwort = antwort_text
+            # Tail flushen, Sentinel durchreichen, Threads sauber beenden.
+            result = pipeline.wait_done()
 
-            # ── VOLLSTÄNDIGES AUDIO SPEICHERN ────────────────────────────
-            # Normale TTS für vollständige Antwort
-            wav_pfad, _, _ = synthesizer.synthesiere_normal(antwort_text)
-            _last_wav = wav_pfad
+            # Gesamte gesprochene Antwort als UI-Text fixieren (falls der
+            # letzte Satz ohne Satzzeichen endete oder on_spoken leicht hinter
+            # der Generierung zuruecklag).
+            _state.set_wav(result.wav_path)
 
-            # ── DATENBANK SPEICHERN ──────────────────────────────────────
+            antwort_text = result.full_text.strip() or ergebnis["antwort"].strip()
+
+            # ── DATENBANK MIT ECHTEN ZEITEN ──────────────────────────────
+            dauer_ges = round(
+                dauer_llm + result.synth_time_s + result.play_time_s, 3
+            )
             datenbank.speichere(
                 frage=frage_text,
                 antwort=antwort_text,
                 dauer_stt=0,
-                dauer_llm=round(ergebnis["dauer_s"], 3),
-                dauer_tts=0,
-                dauer_ges=0,
+                dauer_llm=dauer_llm,
+                dauer_tts=result.synth_time_s,
+                dauer_ges=dauer_ges,
             )
 
-            _last_status = f"✅ Fertig! Audio: {Path(wav_pfad).name}"
-            print(f"✅ Fertig! Audio: {wav_pfad}")
+            _state.set_status(
+                f"✅ Fertig! {result.chunk_count} Sätze "
+                f"(TTS {result.synth_time_s}s) "
+                f"Audio: {Path(result.wav_path).name if result.wav_path else '-'}"
+            )
+            print(f"✅ Fertig! Audio: {result.wav_path}")
 
         except Exception as e:
-            _last_status = f"❌ Fehler: {e}"
+            _state.set_status(f"❌ Fehler: {e}")
             print(f"❌ Fehler: {e}")
         finally:
             with _wake_lock:
                 _processing = False
                 _wake_triggered = False
 
+
 def status_fn():
-    global _last_status, _last_frage, _streaming_text, _last_wav
-    return _last_status, _last_frage, _streaming_text, _last_wav
+    """Atomarer Snapshot fuer den Gradio-Timer: (status, frage, antwort, wav)."""
+    return _state.snapshot()
+
 
 def lade_verlauf_tabelle():
     eintraege = datenbank.lade_alle()
@@ -157,6 +205,7 @@ def lade_verlauf_tabelle():
          e["dauer_stt"], e["dauer_llm"], e["dauer_tts"], e["dauer_ges"]]
         for e in eintraege
     ]
+
 
 if __name__ == "__main__":
     print("🚀 Starte UI...")

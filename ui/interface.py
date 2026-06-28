@@ -12,14 +12,16 @@ def erstelle_interface(transkribiere_fn, antworte_fn, verlauf_fn, status_fn):
             "**Wake Word:** 'Assistent' oder 'Jarvis'  |  "
             "**STT:** Whisper  |  "
             "**LLM:** Gemma3 (Streaming)  |  "
-            "**TTS:** Piper (Echtzeit)"
+            "**TTS:** Piper (Echtzeit-Pipeline)"
         )
 
         gr.Markdown("""
         ### 💬 So funktioniert es:
         1. Sage **'Assistent'** oder **'Jarvis'**
         2. Deine Frage wird transkribiert
-        3. Die Antwort erscheint **Wort für Wort** – **gleichzeitig** wird jedes Wort vorgelesen!
+        3. Die Antwort wird **wortweise** angezeigt – jedes Wort genau dann,
+           wenn es gerade vorgelesen wird. So bleiben Text und Stimme die ganze
+           Zeit synchron und enden gemeinsam.
         """)
 
         status_out = gr.Textbox(label="Status", value="👂 Warte auf Wake Word...", lines=1, interactive=False)
@@ -29,19 +31,21 @@ def erstelle_interface(transkribiere_fn, antworte_fn, verlauf_fn, status_fn):
                 frage_out = gr.Textbox(label="📝 Erkannte Frage", lines=3, interactive=False)
             with gr.Column(scale=1):
                 antwort_out = gr.Textbox(
-                    label="💬 Antwort (Wort für Wort)",
+                    label="💬 Antwort (wortweise, synchron zur Stimme)",
                     lines=5,
                     interactive=False,
                 )
 
         audio_out = gr.Audio(
-            label="🔊 Aktuelles Wort",
+            label="🔊 Aufnahme der Antwort (zum erneuten Anhören)",
             type="filepath",
             interactive=False,
-            autoplay=True,  # Sofort abspielen!
+            autoplay=False,  # Live-Audio läuft bereits über die Soundkarte;
+                             # hier liegt nur die fertige Aufnahme zur Wieder-
+                             # gabe bereit, kein zweites, verzögertes Abspielen.
         )
 
-        timer = gr.Timer(value=0.4)  # Etwas langsamer für stabile Updates
+        timer = gr.Timer(value=0.2)  # Schneller für flüssiges Wort-für-Wort
 
         def update_ui():
             status, frage, antwort, wav = status_fn()
