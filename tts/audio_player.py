@@ -1,33 +1,5 @@
 """
 tts/audio_player.py
-Single continuous audio stream that plays synthesized chunks gaplessly.
-
-This module is the single most important fix for the old pipeline. The previous
-design called fire-and-forget ``sounddevice.play()`` once per *token* with no
-``wait()``: every new call preempted the previous on the shared device, so audio
-overlapped, skipped, paused, and never stayed in sync. There is no way to get
-gapless, ordered playback from repeated ``play()`` calls.
-
-Correct design: exactly one ``sounddevice.OutputStream`` owned by exactly one
-thread, fed sequentially by blocking ``write()``. Key properties:
-
-  * **Gapless & non-overlapping**: samples are written in arrival order to one
-    device buffer. No chunk can preempt another.
-  * **Natural backpressure**: ``write()`` blocks when the device buffer is full.
-    That block propagates up the queues (audio_queue full -> PiperWorker blocks
-    -> text_queue full -> LLM feeder blocks), so generation self-paces to the
-    speaker. This is what kills "text appears slowly / out of sync": the LLM
-    can't run far ahead of the audio.
-  * **Sentence-synced text reveal**: just before writing a sentence's samples,
-    we fire ``on_spoken(display_text)``. The UI therefore reveals exactly the
-    sentence currently being committed to the speaker -- never ahead, never
-    behind.
-  * **One owner thread**: the OutputStream is opened lazily on the first chunk
-    (so wake-word / STT audio devices aren't touched until needed) and closed on
-    end-of-stream.
-
-The player also assembles the full utterance into a single WAV file on disk, so
-history/replay works exactly like before (one file per answer).
 """
 
 from __future__ import annotations
@@ -44,22 +16,12 @@ import sounddevice as sd
 
 from .piper_worker import STREAM_END, AudioTask
 
-# Type alias for the "a chunk started playing" callback.
+
 OnSpoken = Callable[[str], None]
 
 
 class AudioPlayer(threading.Thread):
-    """Consumer of :class:`AudioTask` -> one continuous audio output stream.
-
-    Args:
-        audio_queue: Bounded queue of :class:`AudioTask` / ``STREAM_END``.
-        on_spoken: Called with the display text of each task right as its audio
-            begins playing. Use this to drive the UI reveal. May be ``None``.
-        wav_path: If given, the full utterance is written here as a WAV file
-            (one file per assistant answer, for replay/history). If ``None``,
-            nothing is written to disk.
-        name: Thread name (debugging).
-    """
+    
 
     def __init__(
         self,
@@ -104,31 +66,20 @@ class AudioPlayer(threading.Thread):
         samples = task.samples
         words = self._split_words(task.display)
 
-        # Empty synthesis (error / whitespace-only chunk): show the text at once
-        # so the transcript never falls behind.
         if samples.size == 0:
             self._reveal(task.display)
             return
 
-        # Ensure we have exactly one stream at the chunk's sample rate. In
-        # practice the Piper model is a fixed sample rate (22050), so this opens
-        # once and is reused for the whole utterance.
         self._ensure_stream(task.sample_rate)
 
         t0 = time.perf_counter()
-        # Word-by-word reveal DRIVEN BY THE AUDIO CLOCK: the number of revealed
-        # words grows in proportion to how much of this sentence's audio has
-        # actually been committed to the speaker (written samples / total). So a
-        # word appears only once the audio has reached it, the last word appears
-        # exactly as the last samples play, and reveal never races ahead.
         self._cur_words = words
         self._cur_revealed = 0
         self._write_samples_word_sync(samples, words, task.sample_rate)
         self.play_time_s += time.perf_counter() - t0
         self.tasks_played += 1
 
-        # Guarantee the full sentence is shown even if rounding left a trailing
-        # word unrevealed.
+        
         if words:
             self._reveal_n_words(len(words))
 
@@ -137,14 +88,6 @@ class AudioPlayer(threading.Thread):
     ) -> None:
         """Write one chunk to the device in sub-blocks, revealing words as we go.
 
-        ``OutputStream.write`` blocks when the internal PortAudio buffer is full
-        -> natural backpressure that makes the whole pipeline self-throttle.
-
-        After each sub-block we compute the fraction of this sentence already
-        written and reveal that many words. Mapping is proportional (samples
-        <-> time), which keeps text tightly locked to the *actual* playback rate
-        of the speaker -- not to any timer. No artificial slowdown: the audio
-        still plays at full realtime speed; only the text reveal is paced by it.
         """
         if self._stream is None:
             return
@@ -156,8 +99,7 @@ class AudioPlayer(threading.Thread):
             end = min(start + block, total)
             self._stream.write(samples[start:end])
 
-            # Mirror what is actually played into the recording WAV so the file
-            # contains exactly the audio the user heard (for later replay).
+           
             if self._wav_file is not None:
                 self._wav_file.writeframes(samples[start:end].tobytes())
 
@@ -172,13 +114,10 @@ class AudioPlayer(threading.Thread):
     def _split_words(text: str) -> list:
         """Split display text into reveal units (words + standalone punctuation).
 
-        Whitespace is kept attached so reconstructed text stays exactly verbatim
-        (no missing spaces, no duplicates). Each item is one reveal step.
         """
         import re
 
-        # A "unit" is a run of non-space characters. Whitespace between/around
-        # is preserved as separate tokens so joining them reproduces the text.
+        
         return re.findall(r"\S+|\s+", text)
 
     # -- reveal helpers -----------------------------------------------------
@@ -192,12 +131,7 @@ class AudioPlayer(threading.Thread):
                 print(f"[AudioPlayer] on_spoken Fehler: {exc}")
 
     def _reveal_n_words(self, n: int) -> None:
-        """Reveal the first ``n`` reveal-units of the CURRENT sentence.
-
-        The current sentence's units are buffered in ``_cur_words``; the prefix
-        already revealed is tracked in ``_cur_revealed`` so each new word is
-        appended exactly once (never duplicated, never skipped).
-        """
+        
         if n <= self._cur_revealed:
             return
         # Append only the newly revealed units, in order.
@@ -218,13 +152,10 @@ class AudioPlayer(threading.Thread):
     def _ensure_stream(self, sample_rate: int) -> None:
         if self._stream is not None and self._stream_sample_rate == sample_rate:
             return
-        # Sample rate changed (shouldn't happen with one voice, but stay safe):
-        # tear down the old stream before opening a new one.
+        
         self._close_stream()
 
-        # We model output as float32 for the PortAudio callback; convert from
-        # int16 via the dtype on write. Open lazily so the device is only
-        # grabbed while the assistant is actually speaking.
+        
         self._stream = sd.OutputStream(
             samplerate=sample_rate,
             channels=1,

@@ -1,6 +1,9 @@
 """
 Nimmt Audio vom Mikrofon auf und gibt es als numpy Array zurück.
 Für Whisper: 16 kHz, Mono, int16.
+ zwei Aufnahme-Funktionen:
+  - aufnehmen(dauer)              : feste Dauer (kurz, für Tests)
+  - aufnehmen_bis_stille(...)     : VAD-gesteuert, stoppt nach Stille
 """
 
 import sounddevice as sd
@@ -28,6 +31,9 @@ def aufnehmen_bis_stille(
     stille_dauer: float = 1.5,
     chunk_groesse: int = 1024,
 ) -> np.ndarray:
+    """Nimmt auf, bis Stille erkannt wird (einfacher RMS-basierter VAD).
+
+    """
     print("🎤 Sprechen... (stoppt automatisch nach Stille)")
 
     alle_chunks    = []

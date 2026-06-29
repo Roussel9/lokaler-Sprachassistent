@@ -9,19 +9,18 @@ def erstelle_interface(transkribiere_fn, antworte_fn, verlauf_fn, status_fn):
 
         gr.Markdown("# 🎙️ Lokaler Sprachassistent")
         gr.Markdown(
-            "**Wake Word:** 'Assistent' oder 'Jarvis'  |  "
-            "**STT:** Whisper  |  "
+            "**Wake Word:** 'Computer'  |  "
+            "**STT:** Whisper (medium)  |  "
             "**LLM:** Gemma3 (Streaming)  |  "
             "**TTS:** Piper (Echtzeit-Pipeline)"
         )
 
         gr.Markdown("""
         ### 💬 So funktioniert es:
-        1. Sage **'Assistent'** oder **'Jarvis'**
+        1. Sage **'Computer'**
         2. Deine Frage wird transkribiert
         3. Die Antwort wird **wortweise** angezeigt – jedes Wort genau dann,
-           wenn es gerade vorgelesen wird. So bleiben Text und Stimme die ganze
-           Zeit synchron und enden gemeinsam.
+           wenn es gerade vorgelesen wird.
         """)
 
         status_out = gr.Textbox(label="Status", value="👂 Warte auf Wake Word...", lines=1, interactive=False)
@@ -31,13 +30,13 @@ def erstelle_interface(transkribiere_fn, antworte_fn, verlauf_fn, status_fn):
                 frage_out = gr.Textbox(label="📝 Erkannte Frage", lines=3, interactive=False)
             with gr.Column(scale=1):
                 antwort_out = gr.Textbox(
-                    label="💬 Antwort (wortweise, synchron zur Stimme)",
+                    label="💬 Antwort ( synchron zur Stimme)",
                     lines=5,
                     interactive=False,
                 )
 
         audio_out = gr.Audio(
-            label="🔊 Aufnahme der Antwort (zum erneuten Anhören)",
+            label="🔊 Aufnahme der Antwort ",
             type="filepath",
             interactive=False,
             autoplay=False,  # Live-Audio läuft bereits über die Soundkarte;

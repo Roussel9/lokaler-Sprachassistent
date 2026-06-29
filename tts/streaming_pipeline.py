@@ -1,46 +1,5 @@
 """
 tts/streaming_pipeline.py
-Orchestrates the streaming TTS pipeline and exposes a thread-safe UI snapshot.
-
-Topology (producer -> consumer, each resource has exactly one owner thread)::
-
-    LLM callback (token delta)
-        |
-        v
-    StreamingPipeline.feed()      <-- caller thread (LLM/Ollama reader)
-        |
-        v
-    SentenceChunker               <-- not threaded; runs on the feeder thread
-        |
-        v  (TextChunk)
-    [ text_queue  ]  (bounded)    <-- backpressure point #1
-        |
-        v
-    PiperWorker (owns PiperVoice) <-- thread #1
-        |
-        v  (AudioTask)
-    [ audio_queue ]  (bounded)    <-- backpressure point #2
-        |
-        v
-    AudioPlayer (owns 1 sd.OutputStream) <-- thread #2
-        |
-        v
-    on_spoken(text) -> StreamingState.append_spoken()  <-- UI reveal
-
-The caller's job is tiny: for every Ollama token delta call ``feed(delta)``,
-then ``flush()`` + ``wait_done()``. Everything else is handled here.
-
-Why two queues and not one?
-    Two queues decouple the two slow stages (synthesis and playback) so they can
-    overlap with each other and with generation. Bounded sizes turn "overlap"
-    into "self-pacing": if playback falls behind, both queues fill and the
-    producer blocks, so memory is bounded and text never races ahead of audio.
-
-Thread-safe UI state
-    The Gradio UI polls on a timer from its own thread. All UI-visible fields
-    (status, question, spoken-so-far text, latest wav path) live in
-    :class:`StreamingState`, guarded by a single lock, so the poller never sees
-    a torn read.
 """
 
 from __future__ import annotations
@@ -59,9 +18,7 @@ from .audio_player import AudioPlayer
 from .piper_worker import STREAM_END, PiperWorker
 from .text_chunker import SentenceChunker
 
-# Bounded queue depth. Small on purpose: we want the LLM to stay roughly one or
-# two sentences ahead of the speaker, not buffer the whole answer. When full,
-# ``put`` blocks -> backpressure flows upstream.
+
 _TEXT_QUEUE_SIZE = 4
 _AUDIO_QUEUE_SIZE = 4
 
@@ -81,9 +38,6 @@ class PipelineResult:
 class StreamingState:
     """Thread-safe snapshot of what the UI should show.
 
-    Updated only by the assistant's processing thread (status/question) and by
-    the AudioPlayer's ``on_spoken`` callback (spoken text). Read by the Gradio
-    timer tick. A single lock guards every field -> no torn reads.
     """
 
     status: str = "Bereit"
@@ -101,8 +55,7 @@ class StreamingState:
             self.question = question
 
     def append_spoken(self, text: str) -> None:
-        # Called from the AudioPlayer thread at the moment a sentence's audio
-        # is committed to the speaker. ``text`` is the verbatim display string.
+        
         with self._lock:
             self.spoken += text
 
@@ -123,17 +76,6 @@ class StreamingState:
 class StreamingPipeline:
     """Owns the two queues and the two worker threads for one assistant answer.
 
-    Lifecycle::
-
-        pipe = StreamingPipeline(voice, syn_config, wav_path)
-        pipe.start()
-        for token in llm_stream:        # in the LLM reader callback
-            pipe.feed(token)
-        result = pipe.wait_done()       # flush() + join + timings
-
-    ``feed`` is meant to be called from the Ollama streaming loop (the same
-    thread that reads the HTTP response). It never blocks for long: it only
-    blocks when the text queue is full, which is the intended backpressure.
     """
 
     def __init__(
@@ -176,9 +118,6 @@ class StreamingPipeline:
     def feed(self, delta: str) -> None:
         """Accept one token delta from the LLM stream.
 
-        Chunks produced by the chunker are pushed onto the text queue, which
-        blocks if it is full (backpressure). Safe to call from the LLM reader
-        thread; must not be called after :meth:`wait_done`.
         """
         if not self._started:
             self.start()
@@ -190,17 +129,13 @@ class StreamingPipeline:
     def wait_done(self) -> PipelineResult:
         """Flush the tail, signal end-of-stream, join the threads.
 
-        Returns a :class:`PipelineResult` with the assembled full text, the WAV
-        path (if any), and per-stage wall-clock timings.
         """
         if not self._started:
             self.start()
 
-        # Emit any trailing text that had no sentence terminator.
         for chunk in self._chunker.flush():
             self._text_queue.put(chunk)
 
-        # Sentinels drain the queues in order so both threads exit cleanly.
         self._text_queue.put(STREAM_END)
 
         self._worker.join()
@@ -218,10 +153,6 @@ class StreamingPipeline:
 
     def stop(self) -> None:
         """Force-stop (e.g. on interrupt). Idempotent. Best-effort.
-
-        Puts the sentinel on the text queue so the worker exits; the player
-        follows once its queue drains or this is called. Not used in the normal
-        flow but provided so the caller can bail out without leaking threads.
         """
         try:
             self._text_queue.put_nowait(STREAM_END)

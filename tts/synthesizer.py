@@ -1,28 +1,5 @@
 """
 tts/synthesizer.py
-Owns and loads the Piper voice; provides the synthesis config and a classic
-whole-text synthesis helper.
-
-Role in the new pipeline
-------------------------
-The streaming pipeline (streaming_pipeline.py) needs *one* loaded PiperVoice to
-hand to the PiperWorker. Rather than loading the voice a second time, this class
-keeps being the single owner of the loaded voice and exposes it (plus the shared
-:class:`SynthesisConfig`) so the pipeline can reuse it.
-
-    Synthesizer                       -> owns PiperVoice + SYN_CONFIG
-        .stimme   (PiperVoice)            shared with StreamingPipeline
-        .synth_config (SynthesisConfig)   shared with StreamingPipeline
-        .synthesiere_normal(text)         legacy whole-text -> WAV (kept for
-                                           replay/tests/non-streaming use)
-
-What was removed
-----------------
-The old word-by-word helpers (``synthesiere_wort_sofort``,
-``synthesiere_wort_zu_datei``) and the ``StreamingPlayer`` import are gone. They
-were the unstable pieces: they called fire-and-forget ``sd.play()`` per token,
-which is the root cause of overlapping/skipped audio. Streaming is now done
-correctly by the queue-based pipeline.
 """
 
 import time
@@ -60,7 +37,7 @@ class Synthesizer:
         self._lade_stimme_falls_noetig()
         self.stimme = PiperVoice.load(str(ONNX_PFAD), config_path=str(JSON_PFAD))
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        # Expose the config so the pipeline reuses the exact same settings.
+        
         self.synth_config = SYN_CONFIG
         print("OK TTS Stimme geladen (Piper / Thorsten).")
 
@@ -74,12 +51,8 @@ class Synthesizer:
                 urllib.request.urlretrieve(url, ziel)
 
     def synthesiere_normal(self, text: str, dateiname: str = None) -> tuple:
-        """Whole-text synthesis -> WAV file. Returns (pfad, synth_dauer_s, audio_dauer_s).
-
-        Retained for non-streaming needs (replay, tests). The main streaming
-        flow no longer calls this -- it uses StreamingPipeline instead -- but the
-        method is intentionally kept stable and backwards compatible.
-        """
+        
+        
         text = bereite_text_fuer_tts(text)
         start = time.perf_counter()
         if dateiname is None:

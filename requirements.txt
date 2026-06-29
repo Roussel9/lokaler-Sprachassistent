@@ -1,5 +1,4 @@
 gradio
-vosk
 numpy
 scipy
 torch
