@@ -2,6 +2,7 @@
 interface.py
 """
 
+import time
 import gradio as gr
 
 def erstelle_interface(transkribiere_fn, antworte_fn, verlauf_fn, status_fn):
@@ -10,7 +11,7 @@ def erstelle_interface(transkribiere_fn, antworte_fn, verlauf_fn, status_fn):
         gr.Markdown("# 🎙️ Lokaler Sprachassistent")
         gr.Markdown(
             "**Wake Word:** 'Computer'  |  "
-            "**STT:** Whisper (medium)  |  "
+            "**STT:** Whisper (large)  |  "
             "**LLM:** Gemma3 (Streaming)  |  "
             "**TTS:** Piper (Echtzeit-Pipeline)"
         )
@@ -23,28 +24,39 @@ def erstelle_interface(transkribiere_fn, antworte_fn, verlauf_fn, status_fn):
            wenn es gerade vorgelesen wird.
         """)
 
-        status_out = gr.Textbox(label="Status", value="👂 Warte auf Wake Word...", lines=1, interactive=False)
+        # ─── STATUS ────────────────────────────────────────────────────────
+        status_out = gr.Textbox(
+            label="Status",
+            value="👂 Warte auf Wake Word...",
+            lines=1,
+            interactive=False,
+        )
 
+        # ─── FRAGE & ANTWORT ──────────────────────────────────────────────
         with gr.Row():
             with gr.Column(scale=1):
-                frage_out = gr.Textbox(label="📝 Erkannte Frage", lines=3, interactive=False)
+                frage_out = gr.Textbox(
+                    label="📝 Erkannte Frage",
+                    lines=3,
+                    interactive=False,
+                )
             with gr.Column(scale=1):
                 antwort_out = gr.Textbox(
-                    label="💬 Antwort ( synchron zur Stimme)",
+                    label="💬 Antwort (synchron zur Stimme)",
                     lines=5,
                     interactive=False,
                 )
 
+        # ─── AUDIO ─────────────────────────────────────────────────────────
         audio_out = gr.Audio(
-            label="🔊 Aufnahme der Antwort ",
+            label="🔊 Aufnahme der Antwort",
             type="filepath",
             interactive=False,
-            autoplay=False,  # Live-Audio läuft bereits über die Soundkarte;
-                             # hier liegt nur die fertige Aufnahme zur Wieder-
-                             # gabe bereit, kein zweites, verzögertes Abspielen.
+            autoplay=False,
         )
 
-        timer = gr.Timer(value=0.2)  # Schneller für flüssiges Wort-für-Wort
+        # ─── TIMER ─────────────────────────────────────────────────────────
+        timer = gr.Timer(value=0.3)
 
         def update_ui():
             status, frage, antwort, wav = status_fn()
@@ -52,6 +64,7 @@ def erstelle_interface(transkribiere_fn, antworte_fn, verlauf_fn, status_fn):
 
         timer.tick(update_ui, outputs=[status_out, frage_out, antwort_out, audio_out])
 
+        # ─── VERLAUF ──────────────────────────────────────────────────────
         gr.Markdown("## 📚 Gesprächsverlauf")
         verlauf_tabelle = gr.Dataframe(
             headers=["Zeit", "Frage", "Antwort", "STT(s)", "LLM(s)", "TTS(s)", "Gesamt(s)"],

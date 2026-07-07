@@ -1,7 +1,6 @@
 """
 main.py
 Sprachassistent mit echtem Streaming-Output-Pipeline (satzweise synchron).
-
 """
 
 import os
@@ -31,18 +30,13 @@ datenbank = Datenbank()
 synthesizer = Synthesizer()
 print("✓ Alle Komponenten geladen.\n")
 
-# ---------------------------------------------------------------------------
-# Thread-sicherer UI-Zustand.
-
-# ---------------------------------------------------------------------------
+# ─── THREAD-SICHERER UI-ZUSTAND ──────────────────────────────────────────
 _state = StreamingState(status="👂 Warte auf Wake Word...")
 
-# Wake-Word-/Abarbeitungs-Steuerung (bleibt wie bisher, nur auf _state umgestellt).
 _wake_triggered = False
 _wake_lock = threading.Lock()
 _processing = False
 _listener = None
-
 
 def on_wake():
     global _wake_triggered, _processing
@@ -54,7 +48,6 @@ def on_wake():
         _state.set_status("🎤 Wake Word erkannt! Bitte sprechen...")
     if _listener is not None:
         _listener.pause()
-
 
 def process_wake():
     """Haupt-Abarbeitungs-Loop: Wake -> Aufnahme -> STT -> gestreamtes LLM+TTS."""
@@ -105,8 +98,7 @@ def process_wake():
             _state.set_status("🧠 KI denkt & spricht ...")
             print("🧠 KI denkt & spricht (gestreamt) ...")
 
-            # ── STREAMING-PIPELINE FUER DIESE ANTWORT ────────────────────
-            
+            # ── STREAMING-PIPELINE ──────────────────────────────────────────
             _state.reset_spoken()
             wav_pfad = OUTPUT_DIR / f"stream_{int(time.time())}.wav"
             pipeline = StreamingPipeline(
@@ -120,7 +112,6 @@ def process_wake():
             t_llm_start = time.perf_counter()
 
             def on_token(delta):
-                
                 pipeline.feed(delta)
 
             verlauf = datenbank.lade_verlauf(anzahl=6)
@@ -129,15 +120,12 @@ def process_wake():
             )
             dauer_llm = round(time.perf_counter() - t_llm_start, 3)
 
-            # Tail flushen, Sentinel durchreichen, Threads sauber beenden.
             result = pipeline.wait_done()
-
-            
             _state.set_wav(result.wav_path)
 
             antwort_text = result.full_text.strip() or ergebnis["antwort"].strip()
 
-            # ── DATENBANK MIT ECHTEN ZEITEN ──────────────────────────────
+            # ── DATENBANK ────────────────────────────────────────────────────
             dauer_ges = round(
                 dauer_stt + dauer_llm + result.synth_time_s + result.play_time_s, 3
             )
@@ -157,7 +145,11 @@ def process_wake():
             )
             print(f"✅ Fertig! Audio: {result.wav_path}")
 
+            # ─── UI UPDATE ERZWINGEN (wichtig!) ──────────────────────────
+            # Kurz schlafen, damit der Timer die Änderung mitbekommt
+            time.sleep(0.5)
             
+            # 3 Sekunden warten, dann zurück in den Wartezustand
             time.sleep(3.0)
             _state.set_status("👂 Warte auf Wake Word...")
 
@@ -170,16 +162,13 @@ def process_wake():
             with _wake_lock:
                 _processing = False
                 _wake_triggered = False
-            # Kurz warten, damit TTS-Echo abklingt, bevor das Mikro wieder hoert.
             time.sleep(0.6)
             if _listener is not None:
                 _listener.resume()
 
-
 def status_fn():
     """Atomarer Snapshot fuer den Gradio-Timer: (status, frage, antwort, wav)."""
     return _state.snapshot()
-
 
 def lade_verlauf_tabelle():
     eintraege = datenbank.lade_alle()
@@ -189,10 +178,8 @@ def lade_verlauf_tabelle():
         for e in eintraege
     ]
 
-
 if __name__ == "__main__":
     print("🚀 Starte UI...")
-    # Wake-Word: 'computer' (Vosk-basiert, schnell & halluzinationsfrei).
     _listener = start_wakeword_listener(on_wake, ["computer"])
     process_thread = threading.Thread(target=process_wake, daemon=True)
     process_thread.start()

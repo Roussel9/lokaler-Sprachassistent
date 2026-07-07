@@ -175,6 +175,8 @@ class WakeWordListener:
         self._silent_blocks = 0
         self._reset_recognizer()
         self._paused.clear()
+        time.sleep(0.2)  # Kurze Pause, damit alles stabil ist
+
 
     def _listen(self) -> None:
         first_stream = True
